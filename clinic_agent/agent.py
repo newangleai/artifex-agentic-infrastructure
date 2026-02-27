@@ -1,713 +1,384 @@
-"""
-Sistema de Agentes Paralelos para Clínica Médica
-Utiliza o modelo deepseek-r1:latest para processar múltiplas tarefas simultaneamente
-Versão standalone - não depende de clinic_system
-"""
-
-from google.adk.agents.llm_agent import Agent
-from google.adk.agents.parallel_agent import ParallelAgent
-from google.adk.models.lite_llm import LiteLlm
-from typing import Dict, List, Optional
+import os
+import logging
+from typing import Dict, Optional, Any
 from datetime import datetime
-from enum import Enum
-from dataclasses import dataclass, field
+from google.adk.agents.llm_agent import LlmAgent, Agent
+from dotenv import load_dotenv
 
-# ==================== MODELOS DE DADOS ====================
+from .database import (
+    search_specialty_availability,
+    create_appointment,
+    cancel_appointment,
+    get_appointment_by_id
+)
 
-class InsuranceType(Enum):
-    """Tipos de seguro de saúde"""
-    PARTICULAR = "particular"
-    HEALTH_PLAN = "plano_saude"
+load_dotenv()
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
 
-class AppointmentStatus(Enum):
-    """Status de agendamento"""
-    PENDING = "pending"
-    CONFIRMED = "confirmed"
-    CANCELLED = "cancelled"
+GEMINI_MODEL = os.getenv("MODEL", "gemini-1.5-flash")
 
-@dataclass
-class InsurancePlan:
-    """Plano de saúde"""
-    id: int
-    name: str
-    coverage_percentage: float
-    specialties_covered: List[str]
+# ==================== VALIDADORES ====================
 
-@dataclass
-class Doctor:
-    """Médico"""
-    id: int
-    name: str
-    specialty: str
-    crm: str
-    clinic_id: int
-    consultation_price: float
-    available_slots: List[Dict] = field(default_factory=list)
+def validate_cpf(cpf: str) -> bool:
+    """Valida se CPF tem 11 dígitos"""
+    if not cpf:
+        return False
+    cpf_clean = str(cpf).replace(".", "").replace("-", "").strip()
+    return len(cpf_clean) == 11 and cpf_clean.isdigit()
 
-@dataclass
-class Clinic:
-    """Clínica"""
-    id: int
-    name: str
-    address: str
-    city: str
-    phone: str
+def validate_date_of_birth(date_str: str) -> bool:
+    """Valida data de nascimento em formato DD/MM/YYYY ou YYYY-MM-DD"""
+    if not date_str:
+        return False
+    try:
+        try:
+            datetime.strptime(str(date_str).strip(), "%d/%m/%Y")
+            return True
+        except ValueError:
+            datetime.strptime(str(date_str).strip(), "%Y-%m-%d")
+            return True
+    except:
+        return False
 
-# ==================== BANCO DE DADOS EM MEMÓRIA ====================
-
-class ClinicDatabase:
-    """Banco de dados simplificado em memória"""
-    
-    def __init__(self):
-        self.insurance_plans = {}
-        self.doctors = {}
-        self.clinics = {}
-        self.appointments = {}
-        self.patients = {}
-        self.slots = {}
-        self._init_data()
-    
-    def _init_data(self):
-        """Inicializa dados de exemplo"""
-        
-        # Planos de saúde
-        self.insurance_plans[1] = InsurancePlan(
-            id=1,
-            name="Unimed",
-            coverage_percentage=80.0,
-            specialties_covered=["Cardiologia", "Oftalmologia", "Pediatria"]
-        )
-        
-        self.insurance_plans[2] = InsurancePlan(
-            id=2,
-            name="Amil",
-            coverage_percentage=85.0,
-            specialties_covered=["Cardiologia", "Dermatologia", "Oftalmologia"]
-        )
-        
-        self.insurance_plans[3] = InsurancePlan(
-            id=3,
-            name="Bradesco Saúde",
-            coverage_percentage=75.0,
-            specialties_covered=["Cardiologia", "Pediatria", "Dermatologia"]
-        )
-        
-        # Clínicas
-        self.clinics[1] = Clinic(
-            id=1,
-            name="Clínica Cardio Center",
-            address="Av. Paulista 1000",
-            city="São Paulo",
-            phone="(11) 3000-0001"
-        )
-        
-        self.clinics[2] = Clinic(
-            id=2,
-            name="Clínica Oftalmológica Vision",
-            address="Rua Augusta 500",
-            city="São Paulo",
-            phone="(11) 3000-0002"
-        )
-        
-        # Médicos e horários
-        self.doctors[1] = Doctor(
-            id=1,
-            name="Dr. Carlos Santos",
-            specialty="Cardiologia",
-            crm="12345",
-            clinic_id=1,
-            consultation_price=350.0,
-            available_slots=[
-                {"slot_id": 1, "date": "2025-12-27", "time": "14:00", "datetime": "2025-12-27 14:00"},
-                {"slot_id": 2, "date": "2025-12-27", "time": "14:30", "datetime": "2025-12-27 14:30"},
-                {"slot_id": 3, "date": "2025-12-27", "time": "15:00", "datetime": "2025-12-27 15:00"},
-            ]
-        )
-        
-        self.doctors[2] = Doctor(
-            id=2,
-            name="Dra. Marina Silva",
-            specialty="Pediatria",
-            crm="12346",
-            clinic_id=1,
-            consultation_price=250.0,
-            available_slots=[
-                {"slot_id": 4, "date": "2025-12-28", "time": "10:00", "datetime": "2025-12-28 10:00"},
-                {"slot_id": 5, "date": "2025-12-28", "time": "10:30", "datetime": "2025-12-28 10:30"},
-            ]
-        )
-        
-        self.doctors[3] = Doctor(
-            id=3,
-            name="Dr. Roberto Costa",
-            specialty="Oftalmologia",
-            crm="12347",
-            clinic_id=2,
-            consultation_price=300.0,
-            available_slots=[
-                {"slot_id": 6, "date": "2025-12-29", "time": "16:00", "datetime": "2025-12-29 16:00"},
-                {"slot_id": 7, "date": "2025-12-29", "time": "16:30", "datetime": "2025-12-29 16:30"},
-            ]
-        )
-    
-    def get_insurance_plan(self, plan_id: int) -> Optional[InsurancePlan]:
-        """Busca plano de saúde por ID"""
-        return self.insurance_plans.get(plan_id)
-    
-    def find_doctors_by_specialty(self, specialty: str, plan_id: Optional[int] = None) -> List[Dict]:
-        """Busca médicos por especialidade e plano"""
-        results = []
-        
-        for doctor in self.doctors.values():
-            if doctor.specialty.lower() != specialty.lower():
-                continue
-            
-            # Se tem plano, verifica se o plano cobre a especialidade
-            if plan_id:
-                plan = self.insurance_plans.get(plan_id)
-                if not plan or specialty not in plan.specialties_covered:
-                    continue
-            
-            clinic = self.clinics.get(doctor.clinic_id)
-            
-            results.append({
-                "doctor_id": doctor.id,
-                "doctor_name": doctor.name,
-                "specialty": doctor.specialty,
-                "clinic_id": doctor.clinic_id,
-                "clinic_name": clinic.name if clinic else "N/A",
-                "clinic_address": clinic.address if clinic else "N/A",
-                "clinic_phone": clinic.phone if clinic else "N/A",
-                "consultation_price": doctor.consultation_price,
-                "available_slots": doctor.available_slots
-            })
-        
-        return results
-    
-    def create_appointment(self, patient_data: Dict, doctor_id: int, clinic_id: int, 
-                          slot_id: int, appointment_datetime: str, 
-                          insurance_plan_id: Optional[int] = None) -> Dict:
-        """Cria um agendamento"""
-        appointment_id = len(self.appointments) + 1
-        
-        appointment = {
-            "id": appointment_id,
-            "patient": patient_data,
-            "doctor_id": doctor_id,
-            "clinic_id": clinic_id,
-            "slot_id": slot_id,
-            "appointment_datetime": appointment_datetime,
-            "insurance_plan_id": insurance_plan_id,
-            "status": "confirmed",
-            "created_at": datetime.now().isoformat()
-        }
-        
-        self.appointments[appointment_id] = appointment
-        return appointment
-
-# Instância global do banco de dados
-db = ClinicDatabase()
-
-# Modelo DeepSeek R1 via Ollama
-deepseek_model = LiteLlm(model="ollama_chat/gpt-oss:latest")
+def convert_date_to_iso(date_str: str) -> str:
+    """Converte data DD/MM/YYYY para YYYY-MM-DD"""
+    if not date_str:
+        return None
+    try:
+        date_obj = datetime.strptime(str(date_str).strip(), "%d/%m/%Y")
+        return date_obj.strftime("%Y-%m-%d")
+    except ValueError:
+        return str(date_str).strip()
 
 # ==================== TOOLS ====================
 
-def greet_patient(patient_name: Optional[str] = None) -> Dict:
+def schedule_search(specialty: str) -> Dict[str, Any]:
     """
-    Cumprimenta o paciente e inicia o atendimento.
-    
-    Args:
-        patient_name: Nome do paciente (opcional)
-    
-    Returns:
-        Mensagem de boas-vindas
+    Busca disponibilidade de clínicas, médicos e horários para uma determinada especialidade.
+    IMPORTANTE: Esta ferramenta DEVE ser chamada quando o paciente mencionar uma especialidade.
     """
-    greeting = f"Olá{', ' + patient_name if patient_name else ''}! Bem-vindo(a) à nossa clínica."
-    return {
-        "status": "success",
-        "message": greeting,
-        "next_steps": "Como posso ajudá-lo(a) hoje? Você gostaria de marcar uma consulta?"
-    }
+    logger.info(f"========== SCHEDULE_SEARCH INICIADO ==========")
 
+    specialty = str(specialty).strip() if specialty else ""
+    logger.info(f"Especialidade solicitada: '{specialty}'")
 
-def understand_appointment_request(
-    patient_message: str,
-    specialty: Optional[str] = None,
-    preferred_date: Optional[str] = None
-) -> Dict:
-    """
-    Interpreta a solicitação do paciente para marcação de consulta.
-    
-    Args:
-        patient_message: Mensagem do paciente descrevendo o que precisa
-        specialty: Especialidade médica desejada (se já identificada)
-        preferred_date: Data preferencial (se mencionada)
-    
-    Returns:
-        Informações extraídas da solicitação
-    """
+    if not specialty:
+        logger.warning("Especialidade vazia ou inválida recebida")
+        return {"status": "error", "message": "Por favor, informe uma especialidade válida."}
+
     try:
-        message_lower = patient_message.lower()
-        
-        # Detecta especialidades comuns
-        specialties_map = {
-            "coração": "Cardiologia",
-            "cardio": "Cardiologia",
-            "cardiologia": "Cardiologia",
-            "olho": "Oftalmologia",
-            "vista": "Oftalmologia",
-            "oftalmologia": "Oftalmologia",
-            "criança": "Pediatria",
-            "pediatra": "Pediatria",
-            "pediatria": "Pediatria",
-        }
-        
-        detected_specialty = specialty
-        if not detected_specialty:
-            for keyword, spec in specialties_map.items():
-                if keyword in message_lower:
-                    detected_specialty = spec
-                    break
-        
-        return {
-            "status": "success",
-            "understood": True,
-            "specialty": detected_specialty,
-            "preferred_date": preferred_date,
-            "original_message": patient_message,
-            "needs_more_info": not detected_specialty,
-            "message": f"Entendi que você precisa de {'uma consulta' if detected_specialty else 'atendimento'}. "
-                      f"{'Especialidade: ' + detected_specialty if detected_specialty else 'Qual especialidade você procura?'}"
-        }
-    except Exception as e:
-        return {
-            "status": "error",
-            "message": f"Erro ao processar solicitação: {str(e)}"
-        }
+        logger.debug(f"Chamando search_specialty_availability com: '{specialty}'")
+        results = search_specialty_availability(specialty)
 
+        logger.info(f"Resposta do banco de dados recebida")
+        logger.info(f"Número de resultados encontrados: {len(results) if results else 0}")
 
-def check_patient_insurance(
-    patient_name: str,
-    patient_email: Optional[str] = None,
-    insurance_plan_name: Optional[str] = None,
-    insurance_plan_id: Optional[int] = None
-) -> Dict:
-    """
-    Verifica o plano de saúde do paciente.
-    
-    Args:
-        patient_name: Nome do paciente
-        patient_email: Email do paciente
-        insurance_plan_name: Nome do plano de saúde
-        insurance_plan_id: ID do plano de saúde
-    
-    Returns:
-        Informações do plano de saúde do paciente
-    """
-    try:
-        # Se o ID do plano foi fornecido, busca diretamente
-        if insurance_plan_id:
-            plan = db.get_insurance_plan(insurance_plan_id)
-            if plan:
-                return {
-                    "status": "success",
-                    "has_insurance": True,
-                    "plan_id": plan.id,
-                    "plan_name": plan.name,
-                    "coverage_percentage": plan.coverage_percentage,
-                    "specialties_covered": plan.specialties_covered,
-                    "message": f"Plano {plan.name} identificado com {plan.coverage_percentage}% de cobertura."
-                }
-        
-        # Se o nome do plano foi fornecido, tenta encontrar
-        if insurance_plan_name:
-            for plan in db.insurance_plans.values():
-                if plan.name.lower() in insurance_plan_name.lower():
-                    return {
-                        "status": "success",
-                        "has_insurance": True,
-                        "plan_id": plan.id,
-                        "plan_name": plan.name,
-                        "coverage_percentage": plan.coverage_percentage,
-                        "specialties_covered": plan.specialties_covered,
-                        "message": f"Plano {plan.name} identificado com {plan.coverage_percentage}% de cobertura."
-                    }
-        
-        # Lista todos os planos disponíveis
-        available_plans = [
-            {"id": p.id, "name": p.name, "coverage": p.coverage_percentage}
-            for p in db.insurance_plans.values()
-        ]
-        
-        return {
-            "status": "success",
-            "has_insurance": False,
-            "message": "Não identificamos seu plano. Por favor, informe qual plano você possui.",
-            "available_plans": available_plans
-        }
-    
-    except Exception as e:
-        return {
-            "status": "error",
-            "message": f"Erro ao verificar plano de saúde: {str(e)}"
-        }
-
-
-def search_available_doctors(
-    specialty: str,
-    insurance_plan_id: Optional[int] = None,
-    city: str = "São Paulo",
-    preferred_date: Optional[str] = None
-) -> Dict:
-    """
-    Busca médicos disponíveis para a especialidade e plano especificados.
-    
-    Args:
-        specialty: Especialidade médica
-        insurance_plan_id: ID do plano de saúde (opcional)
-        city: Cidade para busca
-        preferred_date: Data preferencial (opcional)
-    
-    Returns:
-        Lista de médicos disponíveis com horários
-    """
-    try:
-        doctors = db.find_doctors_by_specialty(specialty, insurance_plan_id)
-        
-        if not doctors:
+        if not results:
+            logger.warning(f"Nenhuma disponibilidade encontrada para '{specialty}'")
             return {
-                "status": "error",
-                "message": f"Nenhum médico de {specialty} encontrado para seu plano em {city}.",
-                "doctors_found": 0
+                "status": "not_found",
+                "message": f"Não encontrei disponibilidade para '{specialty}' no momento.",
+                "data": []
             }
-        
+
+        logger.info(f"✓ Sucesso! {len(results)} resultado(s) encontrado(s)")
+
         return {
             "status": "success",
-            "message": f"Encontramos {len(doctors)} médico(s) disponível(is).",
-            "doctors_found": len(doctors),
-            "doctors": doctors,
             "specialty": specialty,
-            "city": city
+            "total_results": len(results),
+            "data": results,
+            "message": f"Encontrei disponibilidade em {len(results)} clinica(s) para {specialty}."
         }
-    
+
     except Exception as e:
+        logger.error(f"❌ EXCEÇÃO em schedule_search: {type(e).__name__}: {str(e)}")
         return {
             "status": "error",
-            "message": f"Erro ao buscar médicos: {str(e)}"
+            "message": f"Erro ao buscar: {str(e)}",
+            "data": []
         }
+    finally:
+        logger.info(f"========== SCHEDULE_SEARCH FINALIZADO ==========\n")
 
 
-def show_doctors_and_schedules(doctors_data: List[Dict]) -> Dict:
-    """
-    Formata e apresenta os médicos e horários disponíveis para o paciente.
-    
-    Args:
-        doctors_data: Lista de médicos com horários disponíveis
-    
-    Returns:
-        Apresentação formatada dos médicos e horários
-    """
-    try:
-        if not doctors_data:
-            return {
-                "status": "error",
-                "message": "Nenhum médico disponível para mostrar."
-            }
-        
-        presentation = []
-        for idx, doctor in enumerate(doctors_data, 1):
-            doctor_info = f"\n{idx}. Dr(a). {doctor['doctor_name']}"
-            doctor_info += f"\n   Clínica: {doctor['clinic_name']}"
-            doctor_info += f"\n   Endereço: {doctor.get('clinic_address', 'N/A')}"
-            doctor_info += f"\n   Telefone: {doctor.get('clinic_phone', 'N/A')}"
-            doctor_info += f"\n   Valor da consulta: R$ {doctor['consultation_price']:.2f}"
-            doctor_info += f"\n   Horários disponíveis:"
-            
-            for slot in doctor.get('available_slots', [])[:3]:
-                doctor_info += f"\n      - {slot['date']} às {slot['time']} (ID: {slot['slot_id']})"
-            
-            presentation.append(doctor_info)
-        
-        formatted_message = "".join(presentation)
-        
-        return {
-            "status": "success",
-            "message": f"Médicos disponíveis:{formatted_message}\n\nPor favor, escolha o médico e horário desejado.",
-            "total_doctors": len(doctors_data)
-        }
-    
-    except Exception as e:
-        return {
-            "status": "error",
-            "message": f"Erro ao formatar apresentação: {str(e)}"
-        }
-
-
-def validate_insurance_coverage(
-    insurance_plan_id: int,
-    specialty: str,
-    consultation_price: float
-) -> Dict:
-    """
-    Valida se o plano de saúde cobre a consulta.
-    
-    Args:
-        insurance_plan_id: ID do plano de saúde
-        specialty: Especialidade médica
-        consultation_price: Preço da consulta
-    
-    Returns:
-        Resultado da validação de cobertura
-    """
-    try:
-        plan = db.get_insurance_plan(insurance_plan_id)
-        
-        if not plan:
-            return {
-                "status": "error",
-                "message": "Plano de saúde não encontrado."
-            }
-        
-        is_covered = specialty in plan.specialties_covered
-        
-        if is_covered:
-            copay = consultation_price * (1 - plan.coverage_percentage / 100)
-            return {
-                "status": "success",
-                "is_covered": True,
-                "plan_name": plan.name,
-                "coverage_percentage": plan.coverage_percentage,
-                "copay_amount": copay,
-                "message": f"Seu plano {plan.name} cobre esta consulta! "
-                          f"Você pagará R$ {copay:.2f} (co-participação de {100 - plan.coverage_percentage}%)."
-            }
-        else:
-            return {
-                "status": "warning",
-                "is_covered": False,
-                "plan_name": plan.name,
-                "message": "Seu plano não cobre esta especialidade. "
-                          f"Valor integral: R$ {consultation_price:.2f}"
-            }
-    
-    except Exception as e:
-        return {
-            "status": "error",
-            "message": f"Erro ao validar cobertura: {str(e)}"
-        }
-
-
-def book_appointment(
+def schedule_appointment(
     patient_name: str,
-    patient_email: str,
-    patient_phone: str,
     patient_cpf: str,
+    patient_date_of_birth: str,
     doctor_id: int,
-    clinic_id: int,
     slot_id: int,
-    appointment_datetime: str,
-    insurance_plan_id: Optional[int] = None,
-    specialty: str = ""
-) -> Dict:
+    clinic_id: str,
+    patient_email: str = None,
+    patient_phone: str = None,
+    insurance_type: str = None,
+    insurance_plan_id: int = None
+) -> Dict[str, Any]:
     """
-    Realiza a marcação da consulta.
-    
-    Args:
-        patient_name: Nome do paciente
-        patient_email: Email do paciente
-        patient_phone: Telefone do paciente
-        patient_cpf: CPF do paciente
-        doctor_id: ID do médico
-        clinic_id: ID da clínica
-        slot_id: ID do horário
-        appointment_datetime: Data e hora da consulta
-        insurance_plan_id: ID do plano de saúde (opcional)
-        specialty: Especialidade
-    
-    Returns:
-        Confirmação da marcação
+    Registra um agendamento no banco de dados e bloqueia o horário.
+    IMPORTANTE: Chame esta ferramenta APÓS coletar todos os dados do paciente.
     """
+    logger.info(f"========== SCHEDULE_APPOINTMENT INICIADO ==========")
+
     try:
+        patient_name = str(patient_name).strip() if patient_name else ""
+        patient_cpf = str(patient_cpf).strip() if patient_cpf else ""
+        patient_date_of_birth = str(patient_date_of_birth).strip() if patient_date_of_birth else ""
+        patient_email = str(patient_email).strip() if patient_email else ""
+        patient_phone = str(patient_phone).strip() if patient_phone else ""
+        insurance_type = str(insurance_type).strip().upper() if insurance_type else None
+
+        logger.info(f"Paciente: {patient_name} | CPF: {patient_cpf}")
+
+        if not validate_cpf(patient_cpf):
+            logger.warning(f"❌ CPF inválido: {patient_cpf}")
+            return {
+                "status": "error",
+                "message": f"CPF inválido: {patient_cpf}. Por favor, informe 11 dígitos sem formatação."
+            }
+
+        if not validate_date_of_birth(patient_date_of_birth):
+            logger.warning(f"❌ Data de nascimento inválida: {patient_date_of_birth}")
+            return {
+                "status": "error",
+                "message": f"Data de nascimento inválida: {patient_date_of_birth}. Use formato DD/MM/YYYY."
+            }
+
+        patient_date_of_birth_iso = convert_date_to_iso(patient_date_of_birth)
+        logger.info(f"Data convertida de '{patient_date_of_birth}' para '{patient_date_of_birth_iso}'")
+
+        if not patient_name or len(patient_name) < 3:
+            return {"status": "error", "message": "Nome do paciente inválido ou incompleto."}
+
+        if not all([doctor_id, slot_id, clinic_id]):
+            return {"status": "error", "message": "Dados de médico, horário ou clínica faltando."}
+
+        try:
+            doctor_id = int(doctor_id)
+            slot_id = int(slot_id)
+            clinic_id = str(clinic_id).strip() if clinic_id else None
+            if insurance_plan_id:
+                insurance_plan_id = int(insurance_plan_id)
+            logger.info(f"✓ Conversão de IDs para BIGINT bem-sucedida")
+        except (ValueError, TypeError) as e:
+            logger.error(f"❌ Erro ao converter IDs: {e}")
+            return {"status": "error", "message": "Erro ao processar IDs. Por favor, tente novamente."}
+
+        valid_types = ['PARTICULAR', 'HEALTH_PLAN']
+        if insurance_type:
+            insurance_type = insurance_type.upper()
+            if insurance_type not in valid_types:
+                insurance_type = 'PARTICULAR'
+        else:
+            insurance_type = 'PARTICULAR'
+
+        logger.info(f"✓ Insurance type validado: {insurance_type}")
+
         patient_data = {
-            "name": patient_name,
-            "email": patient_email,
-            "phone": patient_phone,
-            "cpf": patient_cpf
+            'name': patient_name,
+            'cpf': patient_cpf.replace(".", "").replace("-", ""),
+            'date_of_birth': patient_date_of_birth_iso,
+            'email': patient_email or f"paciente_{patient_cpf}@clinica.com",
+            'phone': patient_phone or "",
+            'insurance_type': insurance_type
         }
-        
-        appointment = db.create_appointment(
+
+        logger.debug(f"Dados do paciente preparados: {patient_data}")
+        logger.info(f"Chamando create_appointment no banco de dados...")
+
+        result = create_appointment(
             patient_data=patient_data,
             doctor_id=doctor_id,
-            clinic_id=clinic_id,
             slot_id=slot_id,
-            appointment_datetime=appointment_datetime,
-            insurance_plan_id=insurance_plan_id
+            clinic_id=clinic_id,
+            insurance_type=insurance_type,
+            insurance_plan_id=insurance_plan_id,
+            notes=None
         )
-        
-        doctor = db.doctors.get(doctor_id)
-        clinic = db.clinics.get(clinic_id)
-        
-        return {
-            "status": "success",
-            "message": "✅ Consulta marcada com sucesso!",
-            "appointment_id": appointment["id"],
-            "details": {
-                "patient": patient_name,
-                "doctor": doctor.name if doctor else "N/A",
-                "specialty": specialty,
-                "clinic": clinic.name if clinic else "N/A",
-                "clinic_address": clinic.address if clinic else "N/A",
-                "clinic_phone": clinic.phone if clinic else "N/A",
-                "date_time": appointment_datetime,
-                "status": "Confirmada"
-            }
-        }
-    
-    except Exception as e:
-        return {
-            "status": "error",
-            "message": f"Erro ao marcar consulta: {str(e)}"
-        }
 
+        logger.debug(f"Resposta do banco de dados: {result}")
+
+        if result['status'] == 'success':
+            appointment_id = result.get('appointment_id')
+            logger.info(f"✓ Agendamento criado com sucesso! ID: {appointment_id}")
+            appointment_details = get_appointment_by_id(appointment_id)
+            return {
+                "status": "success",
+                "appointment_id": appointment_id,
+                "message": "✓ Agendamento confirmado com sucesso!",
+                "details": appointment_details
+            }
+        else:
+            error_msg = result.get('message', 'Erro desconhecido')
+            logger.warning(f"❌ Falha ao criar agendamento: {error_msg}")
+            return result
+
+    except Exception as e:
+        logger.error(f"❌ EXCEÇÃO em schedule_appointment: {type(e).__name__}: {str(e)}")
+        logger.exception("Stack trace completo:")
+        return {"status": "error", "message": f"Erro ao confirmar agendamento: {str(e)}"}
+    finally:
+        logger.info(f"========== SCHEDULE_APPOINTMENT FINALIZADO ==========\n")
+
+
+def cancel_appointment_tool(appointment_id: int, reason: str = None) -> Dict[str, Any]:
+    """
+    Cancela um agendamento e libera o horário.
+    """
+    logger.info(f"========== CANCEL_APPOINTMENT INICIADO ==========")
+
+    try:
+        appointment_id = int(appointment_id) if appointment_id else None
+        reason = str(reason).strip() if reason else None
+
+        logger.info(f"ID do agendamento: {appointment_id}")
+
+        if not appointment_id:
+            return {"status": "error", "message": "ID do agendamento é obrigatório."}
+
+        logger.info(f"Chamando cancel_appointment no banco de dados...")
+        result = cancel_appointment(appointment_id, reason)
+
+        if result['status'] == 'success':
+            logger.info(f"✓ Agendamento cancelado com sucesso!")
+        else:
+            logger.warning(f"❌ Falha ao cancelar: {result.get('message')}")
+
+        return result
+
+    except (ValueError, TypeError) as e:
+        logger.error(f"❌ Erro ao converter appointment_id: {e}")
+        return {"status": "error", "message": f"ID do agendamento inválido: {str(e)}"}
+    except Exception as e:
+        logger.error(f"❌ EXCEÇÃO em cancel_appointment: {type(e).__name__}: {str(e)}")
+        logger.exception("Stack trace completo:")
+        return {"status": "error", "message": f"Erro ao cancelar: {str(e)}"}
+    finally:
+        logger.info(f"========== CANCEL_APPOINTMENT FINALIZADO ==========\n")
 
 # ==================== AGENTS ====================
 
-# Agente de Atendimento ao Paciente
-patient_service_agent = Agent(
-    model=deepseek_model,
-    name="patient_service_agent",
-    description="Agente responsável por atender o paciente, cumprimentar e entender suas necessidades",
+schedule_agent = LlmAgent(
+    model=GEMINI_MODEL,
+    name="agendador_virtual",
+    description="Agente especialista em buscar e confirmar agendamentos de consultas médicas.",
     instruction="""
-    Você é um atendente virtual de uma clínica médica. Seja cordial, profissional e empático.
-    Sua função é:
-    1. Cumprimentar o paciente
-    2. Entender o que ele precisa (marcação de consulta, informações, etc.)
-    3. Identificar a especialidade médica desejada
-    4. Coletar informações básicas do paciente
-    
-    Use as ferramentas disponíveis para processar as solicitações.
-    Sempre seja claro e objetivo nas respostas.
+    # VOCÊ É O AGENDADOR VIRTUAL
+
+    Sua missão é ajudar pacientes a agendar consultas médicas usando as ferramentas disponíveis.
+
+    ## FLUXO OBRIGATÓRIO:
+
+    ### PASSO 1: Buscar Disponibilidade
+    - Quando o paciente mencionar uma especialidade (ex: "cardiologia", "oftalmologia"), 
+      IMEDIATAMENTE use a ferramenta schedule_search com essa especialidade.
+    - Não invente dados! Sempre use schedule_search para buscar informações reais.
+    - Apresente os resultados de forma clara e organizada.
+    - Mostre: Clínica, Médico, Especialidade, Data, Hora, Valor da Consulta
+
+    ### PASSO 2: Coletar Dados do Paciente
+    Antes de confirmar um agendamento, SEMPRE colete:
+    - Nome completo
+    - CPF (11 dígitos exatos, sem formatação: 12345678900)
+    - Data de nascimento (formato DD/MM/YYYY: 15/03/1990)
+    - Email (opcional)
+    - Telefone (opcional)
+
+    ### PASSO 3: Confirmar Detalhes EXPLICITAMENTE
+    Repita TODOS os dados ao paciente e peça confirmação EXPLÍCITA antes de prosseguir:
+    - "Confirma que seu nome é [NOME]?"
+    - "Confirma que seu CPF é [CPF]?"
+    - "Data de nascimento: [DATA]?"
+    - Aguarde resposta explicitamente positiva!
+
+    ### PASSO 4: Registrar Agendamento
+    APÓS confirmação EXPLÍCITA, use schedule_appointment COM TODOS ESTES PARÂMETROS:
+    - patient_name, patient_cpf, patient_date_of_birth, doctor_id, slot_id, clinic_id
+
+    ## REGRAS CRÍTICAS:
+    1. SEMPRE use schedule_search quando uma especialidade é mencionada
+    2. NUNCA invente dados - use sempre dados do banco
+    3. SEMPRE confirme dados ANTES de usar schedule_appointment
+    4. SEMPRE mostre: clínica, médico, especialidade, data, hora, valor
+    5. NUNCA mostre IDs técnicos diretamente ao paciente
+    6. CPF DEVE TER 11 DÍGITOS EXATOS (ex: 12345678900)
+    7. Data DEVE SER DD/MM/YYYY (ex: 15/03/1990)
+    8. doctor_id, slot_id, clinic_id SÃO OBRIGATÓRIOS
+    9. SEMPRE inclua patient_name, patient_cpf, patient_date_of_birth
+    10. Mantenha tom profissional e educado
+    11. NUNCA responda "agendamento feito" sem chamar a ferramenta schedule_appointment
+
+    ## SE NÃO HOUVER DISPONIBILIDADE:
+    - Informe com empatia
+    - Sugira outras especialidades ou datas
+
+    ## SE O PACIENTE PEDIR CANCELAMENTO:
+    - Use cancel_appointment_tool com o ID do agendamento
+    - Peça confirmação EXPLÍCITA antes de cancelar
     """,
-    tools=[greet_patient, understand_appointment_request]
+    tools=[schedule_search, schedule_appointment, cancel_appointment_tool]
 )
 
-# Agente de Verificação de Plano de Saúde
-insurance_agent = Agent(
-    model=deepseek_model,
-    name="insurance_verification_agent",
-    description="Agente responsável por verificar e validar planos de saúde",
-    instruction="""
-    Você é especialista em planos de saúde. Sua função é:
-    1. Identificar qual plano de saúde o paciente possui
-    2. Verificar a cobertura do plano para a especialidade solicitada
-    3. Informar ao paciente sobre valores de co-participação
-    4. Orientar sobre planos aceitos pela clínica
-    
-    Seja claro sobre coberturas e valores.
-    """,
-    tools=[check_patient_insurance, validate_insurance_coverage]
-)
 
-# Agente de Busca de Médicos
-doctor_search_agent = Agent(
-    model=deepseek_model,
-    name="doctor_search_agent",
-    description="Agente responsável por buscar médicos disponíveis",
-    instruction="""
-    Você é responsável por encontrar médicos disponíveis. Sua função é:
-    1. Buscar médicos pela especialidade solicitada
-    2. Filtrar por plano de saúde do paciente
-    3. Verificar disponibilidade de horários
-    4. Apresentar opções ao paciente de forma clara
-    
-    Mostre sempre as melhores opções disponíveis.
-    """,
-    tools=[search_available_doctors, show_doctors_and_schedules]
-)
-
-# Agente de Marcação de Consultas
-booking_agent = Agent(
-    model=deepseek_model,
-    name="booking_agent",
-    description="Agente responsável por realizar a marcação de consultas",
-    instruction="""
-    Você é responsável por finalizar a marcação de consultas. Sua função é:
-    1. Confirmar todos os dados do paciente
-    2. Confirmar médico, horário e clínica escolhidos
-    3. Realizar a marcação no sistema
-    4. Fornecer confirmação detalhada ao paciente
-    
-    Seja meticuloso e confirme todos os detalhes antes de marcar.
-    """,
-    tools=[book_appointment]
-)
-
-# ==================== PARALLEL AGENT ====================
-
-# Agente Paralelo para Busca e Validação Simultâneas
-parallel_search_agent = ParallelAgent(
-    name="parallel_search_and_validation",
-    description="Executa busca de médicos e validação de plano simultaneamente",
-    sub_agents=[
-        doctor_search_agent,
-        insurance_agent
-    ]
-)
-
-# ==================== ROOT AGENT ====================
-
-# Agente Principal que coordena todo o fluxo
 clinic_root_agent = Agent(
-    model=deepseek_model,
+    model=GEMINI_MODEL,
     name="clinic_appointment_system",
-    description="Sistema completo de agendamento de consultas médicas com processamento paralelo",
+    description="Sistema de agendamento de consultas médicas com persistência real no banco de dados.",
     instruction="""
-    Você é o coordenador principal do sistema de agendamento de consultas.
-    
-    Fluxo de atendimento:
-    1. Use o patient_service_agent para atender e entender a solicitação do paciente
-    2. Use o parallel_search_and_validation para buscar médicos E validar plano simultaneamente
-    3. Apresente as opções ao paciente
-    4. Use o booking_agent para finalizar a marcação
-    
-    Coordene os agentes de forma eficiente e mantenha o paciente informado em cada etapa.
-    Seja profissional, claro e eficiente.
+    # VOCÊ É O COORDENADOR DO SISTEMA DE AGENDAMENTO
+
+    Sua função é atender pacientes profissionalmente e garantir que os dados sejam coletados corretamente.
+
+    ## FLUXO PADRÃO:
+
+    1. Cumprimentar: Dê boas-vindas educadamente
+    2. Entender necessidade: Pergunte qual especialidade o paciente precisa
+    3. Validar dados básicos: 
+       - Nome completo 
+       - CPF (11 dígitos: 12345678900) - SEM PONTOS OU HÍFEN
+       - Data de nascimento (formato DD/MM/YYYY: 15/03/1990)
+    4. Confirmar informações: REPITA TUDO e peça confirmação EXPLÍCITA
+    5. DELEGAR IMEDIATAMENTE: Após confirmação explícita, repasse para agendador_virtual
+
+    ## DADOS OBRIGATÓRIOS:
+    - Nome completo (mínimo 3 caracteres, sem abreviações)
+    - CPF (EXATAMENTE 11 dígitos: 12345678900)
+    - Data de nascimento (DD/MM/YYYY: 15/03/1990)
+    - Especialidade desejada
+
+    ## QUALIDADE DO ATENDIMENTO:
+    - Fale no idioma Português do Brasil
+    - SEMPRE confirme dados ANTES de repassar
+    - Se CPF não tiver 11 dígitos, solicite novamente
+    - Se data não estiver em DD/MM/YYYY, peça novamente
+    - NUNCA invente informações
+    - Se falta algum dado, solicite explicitamente
+    - Mantenha tom profissional e amigável
+    - Respeite a privacidade do paciente
+    - Seja direto, não fale mais que o necessário
     """,
-    sub_agents=[
-        patient_service_agent,
-        parallel_search_agent,
-        booking_agent
-    ],
-    tools=[
-        greet_patient,
-        understand_appointment_request,
-        check_patient_insurance,
-        search_available_doctors,
-        show_doctors_and_schedules,
-        validate_insurance_coverage,
-        book_appointment
-    ]
+    sub_agents=[schedule_agent],
+    tools=[]
 )
 
-# Alias para compatibilidade com ADK Web
+# ADK exige esta variável para encontrar o agente raiz
 root_agent = clinic_root_agent
 
-# ==================== EXPORTS ====================
 
-__all__ = [
-    'root_agent',
-    'clinic_root_agent',
-    'patient_service_agent',
-    'insurance_agent',
-    'doctor_search_agent',
-    'booking_agent',
-    'parallel_search_agent',
-    'greet_patient',
-    'understand_appointment_request',
-    'check_patient_insurance',
-    'search_available_doctors',
-    'show_doctors_and_schedules',
-    'validate_insurance_coverage',
-    'book_appointment'
-]
+if __name__ == "__main__":
+    import asyncio
+
+    logger.info("Iniciando Clinic Agent (ADK + Vertex AI Gemini)...")
+
+    async def run_agent():
+        logger.info("✓ Agent iniciado com sucesso!")
+        while True:
+            await asyncio.sleep(1)
+
+    try:
+        asyncio.run(run_agent())
+    except KeyboardInterrupt:
+        logger.info("Agent parado pelo usuário")
+    except Exception as e:
+        logger.error(f"Erro fatal: {e}")

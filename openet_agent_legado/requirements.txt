@@ -1,0 +1,4 @@
+google-adk==1.21.0
+litellm
+psycopg2-binary
+python-dotenv

@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+    <meta charset="UTF-8">
+    <title>ADK WebSocket Client</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 2em; }
+        #messages { border: 1px solid #ccc; padding: 1em; height: 300px; overflow-y: auto; margin-bottom: 1em; }
+        #inputArea { display: flex; gap: 0.5em; }
+        #textInput { flex: 1; }
+    </style>
+</head>
+<body>
+    <h2>ADK WebSocket Client</h2>
+    <div id="messages"></div>
+    <div id="inputArea">
+        <input id="textInput" type="text" placeholder="Digite sua mensagem..." autocomplete="off" />
+        <button id="sendBtn">Enviar</button>
+    </div>
+        <!-- ...existing code... -->
+    <!-- ...existing code... -->
+<script>
+    const ws = new WebSocket(`ws://localhost:8001/ws/adk`);
+    const messagesDiv = document.getElementById('messages');
+    const input = document.getElementById('textInput');
+    const sendBtn = document.getElementById('sendBtn');
+
+    const initPayload = {
+        userId: "u_123",
+    };
+
+    let wsOpen = false;
+    let isCodeBlock = false;
+    let codeBuffer = "";
+    let questionBuffer = "";
+    let iaMsgId = null;
+
+    ws.onopen = () => {
+        wsOpen = true;
+        appendMsg('Sessão ativa');
+        ws.send(JSON.stringify(initPayload));
+    };
+
+    ws.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+
+        // Sessão ou erro
+        if (data.type === "session" || data.error) {
+            appendMsg(`<b>Recebido:</b> ${JSON.stringify(data)}`);
+            return;
+        }
+
+        // Evento de IA (stream)
+        if (
+            data.type === "event" &&
+            data.payload &&
+            data.payload.content &&
+            data.payload.content.parts &&
+            data.payload.content.parts.length > 0
+        ) {
+            const text = data.payload.content.parts[0].text;
+            if (typeof text !== "string") return;
+
+            // Detecta início/fim de bloco de código
+            if (text.startsWith("```")) {
+                isCodeBlock = !isCodeBlock;
+                if (isCodeBlock) {
+                    codeBuffer = "";
+                    questionBuffer = "";
+                    iaMsgId = `ia-msg-${Date.now()}`;
+                    appendMsg(`<b>IA:</b> <span id="${iaMsgId}"></span>`);
+                }
+                return;
+            }
+
+            if (isCodeBlock) {
+                codeBuffer += text;
+
+                // Tenta extrair o campo question do JSON parcial
+                const question = extractQuestionFromPartialJson(codeBuffer);
+                if (question !== null) {
+                    questionBuffer = question;
+                    updateIaMsg(questionBuffer);
+                }
+                return;
+            }
+        }
+    };
+
+    function extractQuestionFromPartialJson(str) {
+        // Busca incremental pelo campo "question": "..."
+        const match = str.match(/"question"\s*:\s*"([^"]*)/);
+        if (match) {
+            return match[1];
+        }
+        return null;
+    }
+
+    function updateIaMsg(text) {
+        if (iaMsgId) {
+            const iaMsg = document.getElementById(iaMsgId);
+            if (iaMsg) {
+                iaMsg.textContent = text;
+            }
+        }
+    }
+
+    ws.onclose = () => {
+        wsOpen = false;
+        appendMsg('<span style="color:red;">Conexão encerrada.</span>');
+    };
+
+    ws.onerror = (err) => {
+        appendMsg('<span style="color:red;">Erro na conexão WebSocket.</span>');
+    };
+
+    sendBtn.onclick = sendMessage;
+    input.onkeydown = (e) => { if (e.key === 'Enter') sendMessage(); };
+
+    function sendMessage() {
+        const text = input.value.trim();
+        if (!text || !wsOpen) return;
+        ws.send(JSON.stringify({ text }));
+        appendMsg(`<b>Você:</b> ${text}`);
+        input.value = '';
+        isCodeBlock = false;
+        codeBuffer = "";
+        questionBuffer = "";
+        iaMsgId = null;
+    }
+
+    function appendMsg(msg) {
+        messagesDiv.innerHTML += msg + '<br>';
+        messagesDiv.scrollTop = messagesDiv.scrollHeight;
+    }
+</script>
+<!-- ...existing code... -->
+<!-- ...existing code... -->
+
+</body>
+</html>
