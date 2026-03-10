@@ -4,7 +4,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 # ⚠️ AJUSTE AQUI para o nome do arquivo onde está seu root_agent
-from agent import root_agent  
+from clinic_agent.agent import root_agent
 
 app = FastAPI()
 

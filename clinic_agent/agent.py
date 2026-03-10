@@ -16,7 +16,7 @@ load_dotenv()
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
-GEMINI_MODEL = os.getenv("MODEL", "gemini-1.5-flash")
+GEMINI_MODEL = os.getenv("MODEL", "gemini-2.5-flash")
 
 # ==================== VALIDADORES ====================
 

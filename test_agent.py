@@ -6,7 +6,7 @@ vertexai.init(
     location="us-central1",
 )
 
-agent = agent_engines.get("projects/819128507112/locations/us-central1/reasoningEngines/5576418411358978048")
+agent = agent_engines.get("projects/819128507112/locations/us-central1/reasoningEngines/666069850455539712")
 
 # Criar sessão
 session = agent.create_session(user_id="test_user")

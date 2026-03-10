@@ -32,9 +32,9 @@ remote_agent = agent_engines.create(
         "DB_HOST": "72.60.143.18",
         "DB_PORT": "5432",
         "GOOGLE_GENAI_USE_VERTEXAI": "TRUE",
-        "MODEL": "gemini-1.5-flash",
+        "MODEL": "gemini-2.5-flash",
     }
 )
 
-print(f"✓ Deploy concluído!")
+print(f"✓ Deploy concluído com sucesso!")
 print(f"Resource name: {remote_agent.resource_name}")

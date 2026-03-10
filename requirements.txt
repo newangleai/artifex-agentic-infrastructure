@@ -1,4 +1,6 @@
-google-adk==1.21.0
+google-cloud-aiplatform[adk,agent_engines]
 litellm
 psycopg2-binary
 python-dotenv
+pydantic>=2.0.0
+cloudpickle>=3.0.0
